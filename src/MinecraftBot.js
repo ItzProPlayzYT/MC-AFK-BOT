@@ -19,42 +19,44 @@ const RECONNECT_DELAY_MS = 15_000;
 const ANTI_AFK_INTERVAL_MS = 5_000;
 const MC_CHAT_LIMIT = 256;
 
-// Local auth cache
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MS_CACHE_DIR = path.join(__dirname, '..', 'auth-cache');
+
 fs.mkdirSync(MS_CACHE_DIR, { recursive: true });
 
-// Auth-plugin prompt patterns
+// AuthMe messages
 const REGISTER_PATTERNS = [
   /\/register/i,
   /please register/i,
   /you must register/i,
   /register to (play|continue)/i,
-  /use \/reg/i,
+  /use \/reg/i
 ];
 
 const LOGIN_PATTERNS = [
-  /\/(login|l) /i,
+  /\/login/i,
+  /\/l /i,
   /please (log\s?in|authenticate)/i,
   /you must (log\s?in|authenticate)/i,
-  /use \/log/i,
+  /use \/log/i
 ];
 
 function extractText(node) {
   if (typeof node === 'string') return node;
+
   if (!node || typeof node !== 'object') return '';
 
-  let t = node.text || node.translate || '';
+  let text = node.text || node.translate || '';
 
   if (Array.isArray(node.extra)) {
-    t += node.extra.map(extractText).join('');
+    text += node.extra.map(extractText).join('');
   }
 
   if (Array.isArray(node.with)) {
-    t += node.with.map(extractText).join('');
+    text += node.with.map(extractText).join('');
   }
 
-  return t;
+  return text;
 }
 
 function parseKickReason(reason) {
@@ -75,6 +77,7 @@ export class MinecraftBot {
   ) {
     this.options = options;
     this.discordChannel = discordChannel;
+
     this.onFatal = onFatal;
     this.onRealUsername = onRealUsername;
 
@@ -92,35 +95,28 @@ export class MinecraftBot {
     this.spawnedOnce = false;
     this.realUsername = null;
 
-    // Stable AuthMe password
+    // Password comes from BotManager.
+    // Fallback is only used if BotManager didn't provide one.
     this.authPassword =
       authPassword ||
-      (Math.random().toString(36).slice(2, 12) + 'Aa1!');
-  }
+      'bots1234';
 
-  // --------------------------------------------------
-  // Discord message helper
-  // --------------------------------------------------
+    this.authRunning = false;
+  }
 
   send(content) {
     this.discordChannel.send(content).catch(() => {});
   }
 
-  // --------------------------------------------------
-  // Microsoft authentication
-  // --------------------------------------------------
-
   async _preAuth() {
     try {
-      const { default: prismarineAuth } =
-        await import('prismarine-auth');
-
+      const { default: prismarineAuth } = await import('prismarine-auth');
       const { Authflow, Titles } = prismarineAuth;
 
       const authOptions = {
         authTitle: Titles.MinecraftNintendoSwitch,
         deviceType: 'Nintendo',
-        flow: 'live',
+        flow: 'live'
       };
 
       const flow = new Authflow(
@@ -128,9 +124,7 @@ export class MinecraftBot {
         MS_CACHE_DIR,
         authOptions,
         (data) => {
-          const mins = Math.floor(
-            (data.expires_in || 900) / 60
-          );
+          const mins = Math.floor((data.expires_in || 900) / 60);
 
           this.send(
             msgSections(
@@ -147,7 +141,6 @@ export class MinecraftBot {
       });
 
       return true;
-
     } catch (err) {
       if (!this.isFatal && !this.isStopping) {
         this.isFatal = true;
@@ -169,172 +162,11 @@ export class MinecraftBot {
     }
   }
 
-  // --------------------------------------------------
-  // RESOURCE PACK HANDLING
-  // --------------------------------------------------
-
-  _setupResourcePackHandler() {
-    if (!this.bot || !this.bot._client) return;
-
-    const client = this.bot._client;
-
-    /*
-     * Modern Minecraft resource packs.
-     *
-     * Some Mineflayer / minecraft-protocol versions don't
-     * automatically answer the resource-pack packet correctly.
-     *
-     * We accept the pack without trying to render the textures.
-     */
-
-    client.on('add_resource_pack', (packet) => {
-      if (this.isStopping || !this.bot) return;
-
-      console.log('[MC] Resource pack requested');
-
-      const uuid =
-        typeof packet.uuid === 'string'
-          ? packet.uuid
-          : packet.uuid?.toString?.();
-
-      console.log('[MC] Resource pack UUID:', uuid || 'none');
-
-      try {
-        client.write('resource_pack_receive', {
-          uuid,
-          result: 3
-        });
-
-        console.log('[MC] Resource pack accepted');
-
-      } catch (err) {
-        console.log(
-          '[MC] Resource pack accept error:',
-          err.message
-        );
-      }
-
-      /*
-       * Tell the server that the pack finished loading.
-       * This is useful for servers which wait for the
-       * SUCCESSFULLY_LOADED response before continuing.
-       */
-
-      setTimeout(() => {
-        if (this.isStopping || !this.bot) return;
-
-        try {
-          client.write('resource_pack_receive', {
-            uuid,
-            result: 0
-          });
-
-          console.log(
-            '[MC] Resource pack marked as loaded'
-          );
-
-        } catch (err) {
-          console.log(
-            '[MC] Resource pack loaded response error:',
-            err.message
-          );
-        }
-      }, 1000);
-    });
-
-    /*
-     * Legacy resource-pack packet.
-     * Used by older Minecraft protocol versions.
-     */
-
-    client.on('resource_pack_send', (packet) => {
-      if (this.isStopping || !this.bot) return;
-
-      console.log(
-        '[MC] Legacy resource pack requested'
-      );
-
-      try {
-        client.write('resource_pack_receive', {
-          hash: packet.hash || '',
-          result: 3
-        });
-
-        console.log(
-          '[MC] Legacy resource pack accepted'
-        );
-
-      } catch (err) {
-        console.log(
-          '[MC] Legacy resource pack accept error:',
-          err.message
-        );
-      }
-
-      setTimeout(() => {
-        if (this.isStopping || !this.bot) return;
-
-        try {
-          client.write('resource_pack_receive', {
-            hash: packet.hash || '',
-            result: 0
-          });
-
-          console.log(
-            '[MC] Legacy resource pack marked as loaded'
-          );
-
-        } catch (err) {
-          console.log(
-            '[MC] Legacy resource pack loaded error:',
-            err.message
-          );
-        }
-      }, 1000);
-    });
-
-    /*
-     * Mineflayer-level resourcePack event.
-     *
-     * If the installed Mineflayer version emits this event,
-     * accept it as well.
-     */
-
-    this.bot.on('resourcePack', (url, hash) => {
-      if (this.isStopping || !this.bot) return;
-
-      console.log(
-        '[MC] Mineflayer resourcePack event received:',
-        url
-      );
-
-      try {
-        this.bot.acceptResourcePack();
-
-        console.log(
-          '[MC] Mineflayer resource pack accepted'
-        );
-      } catch (err) {
-        console.log(
-          '[MC] Mineflayer resource pack accept error:',
-          err.message
-        );
-      }
-    });
-  }
-
-  // --------------------------------------------------
-  // CONNECTION
-  // --------------------------------------------------
-
   async connect() {
-    if (this.isStopping || this.isFatal) {
-      return;
-    }
+    if (this.isStopping || this.isFatal) return;
 
     this.isDisconnecting = false;
 
-    // Clean old bot instance
     if (this.bot) {
       this.bot.removeAllListeners();
 
@@ -345,56 +177,37 @@ export class MinecraftBot {
       this.bot = null;
     }
 
-    // Microsoft authentication
+    // Premium Microsoft authentication
     if (this.options.auth === 'microsoft') {
       const ok = await this._preAuth();
 
-      if (!ok) {
-        return;
-      }
+      if (!ok) return;
     }
 
-    if (this.isStopping || this.isFatal) {
-      return;
-    }
+    if (this.isStopping || this.isFatal) return;
 
-    // Mineflayer options
     const botOptions = {
       host: this.options.host,
       port: this.options.port || 25565,
       username: this.options.username,
+
+      // Cracked = offline
       auth: this.options.auth || 'offline',
+
       version: this.options.version || false,
-
-      // Important:
-      // Do not make Mineflayer throw every protocol error.
-      hideErrors: true,
+      hideErrors: true
     };
-
-    console.log(
-      `[MC] Connecting to ${botOptions.host}:${botOptions.port}`
-    );
 
     this.bot = mineflayer.createBot(botOptions);
 
-    // --------------------------------------------------
-    // Resource pack handler
-    // MUST be registered immediately after createBot()
-    // --------------------------------------------------
-
-    this._setupResourcePackHandler();
-
-    // Pathfinder
     this.bot.loadPlugin(pathfinder);
 
-    // --------------------------------------------------
+    // =========================
     // SPAWN
-    // --------------------------------------------------
+    // =========================
 
     this.bot.on('spawn', () => {
-      if (this.isStopping || this.isFatal) {
-        return;
-      }
+      if (this.isStopping || this.isFatal) return;
 
       this.reconnectAttempts = 0;
       this.isDisconnecting = false;
@@ -403,92 +216,52 @@ export class MinecraftBot {
 
       this.realUsername = name;
 
-      // Notify BotManager once
       if (!this.spawnedOnce && this.onRealUsername) {
         this.spawnedOnce = true;
         this.onRealUsername(name);
       }
 
-      console.log(
-        `[MC] ${name} spawned on ${this.options.host}`
+      this.send(
+        msg(`**${name}** connected to **${this.options.host}**`)
       );
 
-      this.send(
-        msg(
-          `**${name}** connected to **${this.options.host}**`
-        )
-      );
+      const defaultMove = new Movements(this.bot);
+
+      this.bot.pathfinder.setMovements(defaultMove);
 
       this.startAntiAfk();
 
-      try {
-        const defaultMove = new Movements(this.bot);
-        this.bot.pathfinder.setMovements(defaultMove);
-      } catch (err) {
-        console.log(
-          '[MC] Pathfinder setup error:',
-          err.message
-        );
-      }
+      // Automatically try AuthMe.
+      this.startAuth();
     });
 
-    // --------------------------------------------------
-    // SERVER CHAT / AUTH
-    // --------------------------------------------------
+    // =========================
+    // AUTHME CHAT DETECTION
+    // =========================
 
     this.bot.on('messagestr', (raw) => {
-      if (!this.bot || this.isStopping) {
-        return;
-      }
+      if (!this.bot || this.isStopping) return;
 
-      console.log('[MC CHAT]', raw);
+      const text = String(raw || '');
 
-      const t = raw.toLowerCase();
-
-      // Register
-      if (
-        REGISTER_PATTERNS.some((p) => p.test(t))
-      ) {
-        setTimeout(() => {
-          if (this.bot && !this.isStopping) {
-            console.log('[MC] Sending /register');
-
-            this.bot.chat(
-              `/register ${this.authPassword} ${this.authPassword}`
-            );
-          }
-        }, 800);
-
-        return;
-      }
-
-      // Login
-      if (
-        LOGIN_PATTERNS.some((p) => p.test(t))
-      ) {
-        setTimeout(() => {
-          if (this.bot && !this.isStopping) {
-            console.log('[MC] Sending /login');
-
-            this.bot.chat(
-              `/login ${this.authPassword}`
-            );
-          }
-        }, 800);
-      }
+      this.handleAuthMessage(text);
     });
 
-    // --------------------------------------------------
-    // CHAT RELAY
-    // --------------------------------------------------
+    // Some servers send messages through the normal "message" event.
+    this.bot.on('message', (jsonMsg) => {
+      if (!this.bot || this.isStopping) return;
+
+      const text = extractText(jsonMsg);
+
+      this.handleAuthMessage(text);
+    });
+
+    // =========================
+    // NORMAL CHAT
+    // =========================
 
     this.bot.on('chat', (username, chatMessage) => {
-      if (
-        !this.bot ||
-        username === this.bot.username
-      ) {
-        return;
-      }
+      if (!this.bot || username === this.bot.username) return;
 
       this.discordChannel
         .send(
@@ -497,30 +270,18 @@ export class MinecraftBot {
         .catch(() => {});
     });
 
-    // --------------------------------------------------
+    // =========================
     // ERROR
-    // --------------------------------------------------
+    // =========================
 
     this.bot.on('error', (err) => {
-      if (
-        this.isStopping ||
-        this.isFatal
-      ) {
-        return;
-      }
-
-      console.log(
-        '[MC ERROR]',
-        err.code || '',
-        err.message || err
-      );
+      if (this.isStopping || this.isFatal) return;
 
       if (FATAL_CODES.has(err.code)) {
         this.isFatal = true;
 
         const name =
-          this.realUsername ||
-          this.options.username;
+          this.realUsername || this.options.username;
 
         this.send(
           msg(
@@ -536,9 +297,9 @@ export class MinecraftBot {
       }
     });
 
-    // --------------------------------------------------
-    // KICKED
-    // --------------------------------------------------
+    // =========================
+    // KICK
+    // =========================
 
     this.bot.on('kicked', (reason) => {
       if (
@@ -558,10 +319,6 @@ export class MinecraftBot {
 
       const readable = parseKickReason(reason);
 
-      console.log(
-        `[MC KICKED] ${readable}`
-      );
-
       this.send(
         msgSections(
           `**${name}** kicked from **${this.options.host}**`,
@@ -572,11 +329,11 @@ export class MinecraftBot {
       this.handleDisconnect();
     });
 
-    // --------------------------------------------------
-    // END / DISCONNECT
-    // --------------------------------------------------
+    // =========================
+    // END
+    // =========================
 
-    this.bot.on('end', (reason) => {
+    this.bot.on('end', () => {
       if (
         this.isStopping ||
         this.isFatal ||
@@ -587,36 +344,131 @@ export class MinecraftBot {
 
       this.isDisconnecting = true;
 
-      console.log(
-        '[MC END]',
-        reason || 'connection closed'
-      );
-
       this.handleDisconnect();
     });
   }
 
-  // --------------------------------------------------
-  // RECONNECT
-  // --------------------------------------------------
+  // =========================
+  // AUTHME HANDLER
+  // =========================
 
-  handleDisconnect() {
+  handleAuthMessage(text) {
+    if (!text || this.isStopping || !this.bot) return;
+
+    const lower = text.toLowerCase();
+
+    // Register request
     if (
-      this.isStopping ||
-      this.isFatal
+      REGISTER_PATTERNS.some((pattern) =>
+        pattern.test(lower)
+      )
     ) {
+      this.sendRegister();
       return;
     }
 
+    // Login request
+    if (
+      LOGIN_PATTERNS.some((pattern) =>
+        pattern.test(lower)
+      )
+    ) {
+      this.sendLogin();
+    }
+  }
+
+  // =========================
+  // REGISTER
+  // =========================
+
+  sendRegister() {
+    if (!this.bot || this.isStopping) return;
+
+    setTimeout(() => {
+      if (!this.bot || this.isStopping) return;
+
+      this.bot.chat(
+        `/register ${this.authPassword} ${this.authPassword}`
+      );
+    }, 800);
+  }
+
+  // =========================
+  // LOGIN
+  // =========================
+
+  sendLogin() {
+    if (!this.bot || this.isStopping) return;
+
+    setTimeout(() => {
+      if (!this.bot || this.isStopping) return;
+
+      this.bot.chat(
+        `/login ${this.authPassword}`
+      );
+    }, 800);
+  }
+
+  // =========================
+  // AUTOMATIC AUTH
+  // =========================
+
+  startAuth() {
+    if (this.authRunning) return;
+
+    this.authRunning = true;
+
+    // First try REGISTER.
+    // If account already exists, server will reject register,
+    // then LOGIN will authenticate it.
+
+    setTimeout(() => {
+      if (!this.bot || this.isStopping) return;
+
+      this.bot.chat(
+        `/register ${this.authPassword} ${this.authPassword}`
+      );
+    }, 2000);
+
+    // Then try LOGIN.
+    setTimeout(() => {
+      if (!this.bot || this.isStopping) return;
+
+      this.bot.chat(
+        `/login ${this.authPassword}`
+      );
+    }, 4500);
+
+    // Extra login fallback.
+    setTimeout(() => {
+      if (!this.bot || this.isStopping) return;
+
+      this.bot.chat(
+        `/login ${this.authPassword}`
+      );
+    }, 7000);
+
+    // Allow auth sequence again after reconnect.
+    setTimeout(() => {
+      this.authRunning = false;
+    }, 9000);
+  }
+
+  // =========================
+  // DISCONNECT / RECONNECT
+  // =========================
+
+  handleDisconnect() {
+    if (this.isStopping || this.isFatal) return;
+
     this.stopAntiAfk();
 
-    const name =
-      this.realUsername ||
-      this.options.username;
+    this.authRunning = false;
 
-    if (
-      this.reconnectAttempts >= MAX_RECONNECTS
-    ) {
+    const name =
+      this.realUsername || this.options.username;
+
+    if (this.reconnectAttempts >= MAX_RECONNECTS) {
       this.send(
         msg(
           `**${name}** — max reconnects reached\n-# removed after ${MAX_RECONNECTS} failed attempts`
@@ -634,8 +486,7 @@ export class MinecraftBot {
 
     this.reconnectAttempts++;
 
-    const delaySec =
-      RECONNECT_DELAY_MS / 1000;
+    const delaySec = RECONNECT_DELAY_MS / 1000;
 
     this.send(
       msg(
@@ -647,62 +498,39 @@ export class MinecraftBot {
       clearTimeout(this.reconnectTimeout);
     }
 
-    this.reconnectTimeout = setTimeout(
-      () => {
-        this.connect().catch((err) => {
-          console.error(
-            '[MinecraftBot] reconnect error:',
-            err
-          );
-        });
-      },
-      RECONNECT_DELAY_MS
-    );
+    this.reconnectTimeout = setTimeout(() => {
+      this.connect().catch(() => {});
+    }, RECONNECT_DELAY_MS);
   }
 
-  // --------------------------------------------------
+  // =========================
   // ANTI AFK
-  // --------------------------------------------------
+  // =========================
 
   startAntiAfk() {
     this.stopAntiAfk();
 
-    // Jump every 5 seconds
     this.jumpInterval = setInterval(() => {
       if (this.bot?.entity) {
-        this.bot.setControlState(
-          'jump',
-          true
-        );
+        this.bot.setControlState('jump', true);
 
         setTimeout(() => {
           if (this.bot) {
-            this.bot.setControlState(
-              'jump',
-              false
-            );
+            this.bot.setControlState('jump', false);
           }
         }, 400);
       }
     }, ANTI_AFK_INTERVAL_MS);
 
-    // Rotate view every 30 seconds
     this.lookInterval = setInterval(() => {
       if (this.bot?.entity) {
         const yaw =
-          Math.random() *
-            Math.PI *
-            2 -
-          Math.PI;
+          Math.random() * Math.PI * 2 - Math.PI;
 
         const pitch =
           (Math.random() - 0.5) * 1.0;
 
-        this.bot.look(
-          yaw,
-          pitch,
-          false
-        );
+        this.bot.look(yaw, pitch, false);
       }
     }, 30_000);
   }
@@ -719,36 +547,27 @@ export class MinecraftBot {
     }
   }
 
-  // --------------------------------------------------
+  // =========================
   // JUMP COMMAND
-  // --------------------------------------------------
+  // =========================
 
   jump() {
     const name =
-      this.realUsername ||
-      this.options.username;
+      this.realUsername || this.options.username;
 
     if (!this.bot?.entity) {
       this.send(
-        msg(
-          `**${name}** — not in-game, cannot jump`
-        )
+        msg(`**${name}** — not in-game, cannot jump`)
       );
 
       return;
     }
 
-    this.bot.setControlState(
-      'jump',
-      true
-    );
+    this.bot.setControlState('jump', true);
 
     setTimeout(() => {
       if (this.bot) {
-        this.bot.setControlState(
-          'jump',
-          false
-        );
+        this.bot.setControlState('jump', false);
       }
     }, 400);
 
@@ -757,20 +576,17 @@ export class MinecraftBot {
     );
   }
 
-  // --------------------------------------------------
+  // =========================
   // SAY COMMAND
-  // --------------------------------------------------
+  // =========================
 
   say(text) {
     const name =
-      this.realUsername ||
-      this.options.username;
+      this.realUsername || this.options.username;
 
     if (!this.bot?.entity) {
       this.send(
-        msg(
-          `**${name}** — not in-game, cannot send message`
-        )
+        msg(`**${name}** — not in-game, cannot send message`)
       );
 
       return;
@@ -778,29 +594,26 @@ export class MinecraftBot {
 
     const truncated =
       text.length > MC_CHAT_LIMIT
-        ? text.slice(
-            0,
-            MC_CHAT_LIMIT
-          )
+        ? text.slice(0, MC_CHAT_LIMIT)
         : text;
 
     this.bot.chat(truncated);
 
     this.send(
-      msg(
-        `**${name}** said: ${truncated}`
-      )
+      msg(`**${name}** said: ${truncated}`)
     );
   }
 
-  // --------------------------------------------------
+  // =========================
   // STOP
-  // --------------------------------------------------
+  // =========================
 
   stop() {
     this.isStopping = true;
 
     this.stopAntiAfk();
+
+    this.authRunning = false;
 
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
@@ -817,4 +630,4 @@ export class MinecraftBot {
       this.bot = null;
     }
   }
-                }
+    }
