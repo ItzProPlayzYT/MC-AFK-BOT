@@ -3,15 +3,30 @@
 import { MinecraftBot } from './MinecraftBot.js';
 import { msg, msgList } from './ui.js';
 
-// Fixed password for ALL cracked bots
-const CRACKED_BOT_PASSWORD = 'bots1234';
-
 export class BotManager {
   constructor() {
-    // Map key:
+    // Map key format:
     // username@host
     // or msa:discordId@host before premium login
     this.bots = new Map();
+
+    // Stores random AuthMe passwords
+    // Key: username@host
+    // Value: password
+    this._authPasswords = new Map();
+  }
+
+  _getAuthPassword(username, host) {
+    const key = `${username}@${host}`;
+
+    if (!this._authPasswords.has(key)) {
+      const password =
+        Math.random().toString(36).slice(2, 12) + 'Aa1!';
+
+      this._authPasswords.set(key, password);
+    }
+
+    return this._authPasswords.get(key);
   }
 
   // =========================
@@ -29,6 +44,12 @@ export class BotManager {
       );
     }
 
+    // Generate/get random password
+    const authPassword = this._getAuthPassword(
+      options.username,
+      options.host
+    );
+
     const bot = new MinecraftBot(
       {
         ...options,
@@ -36,16 +57,16 @@ export class BotManager {
       },
       channel,
 
-      // When bot is removed
+      // Remove bot
       () => {
         this.bots.delete(key);
       },
 
-      // Not needed for cracked bot
+      // Cracked bots don't need this
       null,
 
-      // Fixed AuthMe password
-      CRACKED_BOT_PASSWORD
+      // Random AuthMe password
+      authPassword
     );
 
     this.bots.set(key, bot);
@@ -129,7 +150,6 @@ export class BotManager {
 
     if (this.bots.has(exactKey)) {
       this.bots.get(exactKey).stop();
-
       this.bots.delete(exactKey);
 
       return channel.send(
@@ -148,7 +168,6 @@ export class BotManager {
         )
       ) {
         bot.stop();
-
         this.bots.delete(key);
 
         return channel.send(
