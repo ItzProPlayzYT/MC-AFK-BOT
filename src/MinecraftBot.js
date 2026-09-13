@@ -817,4 +817,4 @@ export class MinecraftBot {
       this.bot = null;
     }
   }
-  }
+                }
